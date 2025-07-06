@@ -3,6 +3,10 @@ from flask_sqlalchemy import SQLAlchemy
 import os
 from sqlalchemy.exc import OperationalError
 import time
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
 db = SQLAlchemy()
@@ -18,11 +22,11 @@ def get_database_url():
     try:
         engine = db.create_engine(postgres_url)
         engine.connect()
-        print("Connected to PostgreSQL")
+        logging.info("Connected to PostgreSQL")
         return postgres_url
     except OperationalError as e:
-        print(f"PostgreSQL connection failed: {e}")
-        print("Falling back to SQLite")
+        logging.error(f"PostgreSQL connection failed: {e}")
+        logging.error("Database connection error - falling back to SQLite")
         return 'sqlite:///local_cache.db'
 
 # Configure the SQLAlchemy database connection
@@ -74,19 +78,41 @@ HTML = '''
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
-    if request.method == 'POST':
-        name = request.form['name']
-        new_item = Item(name=name)
-        db.session.add(new_item)
-        db.session.commit()
-    items = Item.query.all()
-    db_type = "PostgreSQL" if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI'] else "SQLite (Local Cache)"
-    return render_template_string(HTML, items=items, db_type=db_type)
+    try:
+        if request.method == 'POST':
+            name = request.form['name']
+            if not name or len(name.strip()) == 0:
+                logging.error("Empty item name provided")
+                raise ValueError("Item name cannot be empty")
+            new_item = Item(name=name)
+            db.session.add(new_item)
+            db.session.commit()
+            logging.info(f"Added new item: {name}")
+        items = Item.query.all()
+        db_type = "PostgreSQL" if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI'] else "SQLite (Local Cache)"
+        return render_template_string(HTML, items=items, db_type=db_type)
+    except Exception as e:
+        logging.error(f"Error in index route: {str(e)}")
+        db.session.rollback()
+        return f"An error occurred: {str(e)}", 500
 
 @app.route('/items', methods=['GET'])
 def get_items():
-    items = Item.query.all()
-    return jsonify([{"id": item.id, "name": item.name} for item in items])
+    try:
+        items = Item.query.all()
+        logging.info(f"Retrieved {len(items)} items")
+        return jsonify([{"id": item.id, "name": item.name} for item in items])
+    except Exception as e:
+        logging.error(f"Error retrieving items: {str(e)}")
+        return jsonify({"error": "Failed to retrieve items"}), 500
+
+@app.route('/error-test')
+def error_test():
+    """Route to generate test errors"""
+    logging.error("Test error log generated")
+    logging.warning("Test warning log generated")
+    logging.critical("Test critical log generated")
+    return "Error logs generated", 200
 
 # Create tables
 with app.app_context():

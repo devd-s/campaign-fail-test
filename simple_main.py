@@ -1,4 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Boolean, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -6,12 +9,112 @@ from sqlalchemy.exc import OperationalError, IntegrityError
 from datetime import datetime
 import os
 import logging
+import json
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Initialize Sentry for error monitoring
+try:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=os.getenv("SENTRY_DSN", "MENTION_KEYS_HERE"),
+        send_default_pii=True,
+        traces_sample_rate=1.0,
+    )
+    HAS_SENTRY = True
+    print("✅ Sentry initialized successfully")
+except ImportError:
+    HAS_SENTRY = False
+    print("⚠️ Sentry SDK not available - errors will not be tracked")
+
+# Try to import JSON logger for production, fall back to basic logging for development
+try:
+    from pythonjsonlogger import jsonlogger
+    HAS_JSON_LOGGER = True
+except ImportError:
+    HAS_JSON_LOGGER = False
+
+# Try to import Datadog tracer
+try:
+    from ddtrace import tracer, patch_all
+    from ddtrace.contrib.logging import patch as logging_patch
+    HAS_DATADOG = True
+    # Auto-instrument common libraries
+    patch_all()
+    # Patch logging to include trace IDs
+    logging_patch()
+except ImportError:
+    HAS_DATADOG = False
+
+# Try to import AWS CloudWatch logging handler
+try:
+    import boto3
+    from watchtower import CloudWatchLogsHandler
+    HAS_CLOUDWATCH = True
+except ImportError:
+    HAS_CLOUDWATCH = False
+
+# Configure logging for production with JSON format (Datadog-friendly)
+def setup_logging():
+    # Create logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Remove default handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # Create appropriate formatter
+    if HAS_JSON_LOGGER and os.getenv('ENVIRONMENT') == 'production':
+        # JSON formatter for production (Datadog)
+        if HAS_DATADOG:
+            # Include Datadog trace information
+            formatter = jsonlogger.JsonFormatter(
+                '%(asctime)s %(name)s %(levelname)s %(message)s %(dd.trace_id)s %(dd.span_id)s',
+                timestamp=True
+            )
+        else:
+            formatter = jsonlogger.JsonFormatter(
+                '%(asctime)s %(name)s %(levelname)s %(message)s',
+                timestamp=True
+            )
+    else:
+        # Standard formatter for development
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    
+    # Create console handler
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    
+    # Add CloudWatch handler in AWS environment
+    if HAS_CLOUDWATCH and os.getenv('ENVIRONMENT') == 'production':
+        try:
+            cloudwatch_handler = CloudWatchLogsHandler(
+                log_group='/ecs/campaign-api',
+                stream_name=f"campaign-api-{os.getenv('HOSTNAME', 'unknown')}"
+            )
+            cloudwatch_handler.setFormatter(formatter)
+            logger.addHandler(cloudwatch_handler)
+        except Exception as e:
+            # Fallback if CloudWatch setup fails
+            logger.warning(f"Failed to setup CloudWatch logging: {e}")
+    
+    return logging.getLogger(__name__)
+
+# Setup logging
+logger = setup_logging()
 
 app = FastAPI(title="Campaign Launch API", version="1.0.0")
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 # Database configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./campaigns.db")
@@ -46,8 +149,18 @@ try:
 except Exception as e:
     logger.error(f"Error creating database tables: {e}")
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
+    """Serve the frontend HTML page"""
+    try:
+        with open("index.html", "r") as f:
+            return HTMLResponse(content=f.read(), status_code=200)
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Frontend not found</h1><p>Please ensure index.html exists in the project directory.</p>", status_code=404)
+
+@app.get("/api/")
+async def api_status():
+    """API status endpoint for frontend to check connectivity"""
     return {"message": "Campaign Launch API", "status": "running"}
 
 @app.post("/campaigns/create")
@@ -299,6 +412,20 @@ async def full_campaign_launch_flow(campaign_id: int, db: Session = Depends(get_
             "error": str(e),
             "campaign_id": campaign_id
         }
+
+@app.get("/test-error")
+async def test_error():
+    """Test endpoint to trigger Sentry error"""
+    logger.error("Test error triggered for Sentry monitoring")
+    # Intentionally cause an error
+    raise Exception("This is a test error for Sentry - triggered manually")
+
+@app.get("/test-division-error")
+async def test_division_error():
+    """Test endpoint to trigger division by zero error"""
+    logger.error("Division by zero error triggered for Sentry monitoring")
+    result = 1 / 0
+    return {"result": result}
 
 if __name__ == "__main__":
     import uvicorn
