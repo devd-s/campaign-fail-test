@@ -31,7 +31,7 @@
       "environment": [
         {
           "name": "DD_API_KEY",
-          "value": "a7f4bb5ae8477e07d88afa84683ff304"
+          "value": "ed05c2240779b183d8c0b5d11c83afd2"
         },
         {
           "name": "DD_LOGS_ENABLED",

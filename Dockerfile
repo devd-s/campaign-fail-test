@@ -15,5 +15,5 @@ ENV RUN_ENV=production
 # Expose port
 EXPOSE 8000
 
-# Use uvicorn to run the FastAPI application
-CMD ["uvicorn", "simple_main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use uvicorn to run the FastAPI application from backend folder
+CMD ["uvicorn", "backend.app:app", "--host", "0.0.0.0", "--port", "8000"]

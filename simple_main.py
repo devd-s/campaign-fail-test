@@ -300,10 +300,22 @@ class HTTPLoggingMiddleware(BaseHTTPMiddleware):
             })
         
         # Log the request with extra fields
-        getattr(logger, log_level.lower())(
-            f"{client_ip} - \"{method} {path} HTTP/1.1\" {status_code} - {round(process_time * 1000, 2)}ms", 
-            extra=log_data
-        )
+        # Force ERROR level for 5xx status codes to ensure proper alerting
+        if status_code >= 500:
+            logger.error(
+                f"{client_ip} - \"{method} {path} HTTP/1.1\" {status_code} - {round(process_time * 1000, 2)}ms", 
+                extra=log_data
+            )
+        elif status_code >= 400:
+            logger.warning(
+                f"{client_ip} - \"{method} {path} HTTP/1.1\" {status_code} - {round(process_time * 1000, 2)}ms", 
+                extra=log_data
+            )
+        else:
+            logger.info(
+                f"{client_ip} - \"{method} {path} HTTP/1.1\" {status_code} - {round(process_time * 1000, 2)}ms", 
+                extra=log_data
+            )
         
         return response
 
@@ -873,6 +885,272 @@ async def test_db_constraint_error(db: Session = Depends(get_db)):
                 error_id=error_id,
                 context=context
             )
+        )
+
+@app.get("/test-table-not-found-error")
+async def test_table_not_found_error(db: Session = Depends(get_db)):
+    """Test endpoint to trigger table not found database error"""
+    error_id = generate_error_id()
+    context = {
+        "endpoint": "/test-table-not-found-error",
+        "operation": "test_table_not_found"
+    }
+    
+    try:
+        # Attempt to query a non-existent table
+        db.execute(text("SELECT * FROM missing_campaigns_table WHERE id = 1"))
+        return {"message": "This should not be reached"}
+        
+    except OperationalError as e:
+        db.rollback()
+        
+        log_production_error(
+            error=e,
+            error_type="TableNotFoundError",
+            message="Attempted to access non-existent database table",
+            context=context,
+            error_id=error_id,
+            http_status_code=500
+        )
+        
+        raise HTTPException(
+            status_code=500,
+            detail=create_error_response(
+                error_type="TableNotFoundError",
+                message="Database table 'missing_campaigns_table' does not exist",
+                status_code=500,
+                error_id=error_id,
+                context=context,
+                expose_details=True
+            )
+        )
+    except Exception as e:
+        db.rollback()
+        
+        log_production_error(
+            error=e,
+            error_type="UnexpectedDatabaseError",
+            message="Unexpected error during table not found test",
+            context=context,
+            error_id=error_id,
+            http_status_code=500
+        )
+        
+        raise HTTPException(
+            status_code=500,
+            detail=create_error_response(
+                error_type="UnexpectedDatabaseError",
+                message="An unexpected error occurred during table lookup",
+                status_code=500,
+                error_id=error_id,
+                context=context
+            )
+        )
+
+@app.get("/test-null-reference-error")
+async def test_null_reference_error():
+    """Test endpoint to trigger null reference/attribute error"""
+    error_id = generate_error_id()
+    context = {
+        "endpoint": "/test-null-reference-error",
+        "operation": "test_null_reference"
+    }
+    
+    try:
+        # Create a None object and try to access its attributes
+        null_object = None
+        
+        # This will raise AttributeError: 'NoneType' object has no attribute 'name'
+        campaign_name = null_object.name
+        
+        return {"message": "This should not be reached", "name": campaign_name}
+        
+    except AttributeError as e:
+        log_production_error(
+            error=e,
+            error_type="NullReferenceError",
+            message="Attempted to access attribute on null object",
+            context=context,
+            error_id=error_id,
+            http_status_code=500
+        )
+        
+        raise HTTPException(
+            status_code=500,
+            detail=create_error_response(
+                error_type="NullReferenceError",
+                message="Cannot access 'name' attribute on null object - object is None",
+                status_code=500,
+                error_id=error_id,
+                context=context,
+                expose_details=True
+            )
+        )
+    except Exception as e:
+        log_production_error(
+            error=e,
+            error_type="UnexpectedError",
+            message="Unexpected error during null reference test",
+            context=context,
+            error_id=error_id,
+            http_status_code=500
+        )
+        
+        raise HTTPException(
+            status_code=500,
+            detail=create_error_response(
+                error_type="UnexpectedError",
+                message="An unexpected error occurred during null reference test",
+                status_code=500,
+                error_id=error_id,
+                context=context
+            )
+        )
+
+@app.get("/test-null-safe-handling")
+async def test_null_safe_handling():
+    """Demonstrate defensive coding techniques to prevent null reference errors"""
+    logger.info("Demonstrating null-safe coding practices")
+    
+    # Simulate potentially null data (like from database or API)
+    campaign_data = None  # This could be a failed database query result
+    user_input = None     # This could be missing request data
+    config_value = None   # This could be missing configuration
+    
+    # Method 1: Basic null check with early return
+    def safe_get_campaign_name_v1(campaign):
+        if campaign is None:
+            return "Unknown Campaign"
+        return getattr(campaign, 'name', 'Unnamed Campaign')
+    
+    # Method 2: Using getattr with default value
+    def safe_get_campaign_name_v2(campaign):
+        return getattr(campaign, 'name', 'Default Campaign') if campaign else 'No Campaign'
+    
+    # Method 3: Try-except approach
+    def safe_get_campaign_name_v3(campaign):
+        try:
+            return campaign.name
+        except AttributeError:
+            return "Campaign Name Not Available"
+    
+    # Method 4: Using Optional type hints and validation
+    def safe_process_campaign_data(campaign: Optional[dict]) -> dict:
+        if not campaign:
+            return {"status": "error", "message": "No campaign data provided"}
+        
+        # Safely get nested values with defaults
+        name = campaign.get('name', 'Untitled Campaign')
+        description = campaign.get('description', 'No description available')
+        status = campaign.get('status', 'unknown')
+        
+        return {
+            "status": "success",
+            "campaign": {
+                "name": name,
+                "description": description,
+                "status": status
+            }
+        }
+    
+    # Method 5: Null-safe chain operations
+    def safe_get_nested_value(data, *keys, default=None):
+        """Safely navigate nested dictionary/object structure"""
+        current = data
+        for key in keys:
+            if current is None:
+                return default
+            if isinstance(current, dict):
+                current = current.get(key)
+            else:
+                current = getattr(current, key, None)
+        return current if current is not None else default
+    
+    # Demonstrate all approaches
+    examples = {
+        "method_1_basic_check": safe_get_campaign_name_v1(campaign_data),
+        "method_2_getattr": safe_get_campaign_name_v2(campaign_data),
+        "method_3_try_except": safe_get_campaign_name_v3(campaign_data),
+        "method_4_dict_processing": safe_process_campaign_data(None),
+        "method_5_nested_safe": safe_get_nested_value(None, 'campaign', 'metadata', 'name', default="Safe Default")
+    }
+    
+    # Example with actual data to show it works with valid input too
+    valid_campaign_dict = {
+        "name": "Summer Sale 2025",
+        "description": "Our biggest summer campaign",
+        "status": "active",
+        "metadata": {"created_by": "admin", "priority": "high"}
+    }
+    
+    examples["method_4_with_valid_data"] = safe_process_campaign_data(valid_campaign_dict)
+    examples["method_5_with_valid_data"] = safe_get_nested_value(
+        valid_campaign_dict, 'metadata', 'created_by', default="Unknown Creator"
+    )
+    
+    return {
+        "message": "Null-safe handling examples completed successfully",
+        "examples": examples,
+        "best_practices": [
+            "Always check for None before accessing attributes",
+            "Use getattr() with default values",
+            "Implement try-except blocks for attribute access",
+            "Use Optional type hints for better code clarity",
+            "Create utility functions for safe nested access",
+            "Return meaningful default values instead of None",
+            "Validate input parameters at function entry points"
+        ],
+        "status": "success"
+    )
+
+@app.get("/campaigns/{campaign_id}/analytics")
+async def get_campaign_analytics(campaign_id: int, db: Session = Depends(get_db)):
+    """
+    BROKEN ENDPOINT: This has null pointer vulnerabilities that need fixing via PR
+    This endpoint demonstrates real-world null reference errors that could happen
+    """
+    try:
+        campaign = db.query(Campaign).filter(Campaign.id == campaign_id).first()
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        
+        # PROBLEM 1: Direct attribute access without null checks
+        campaign_name = campaign.name.upper()  # Will fail if campaign.name is None
+        
+        # PROBLEM 2: Unsafe nested attribute access 
+        launch_date = campaign.launched_at.strftime("%Y-%m-%d")  # Will fail if launched_at is None
+        
+        # PROBLEM 3: Unsafe string operations
+        description_length = len(campaign.description)  # Will fail if description is None
+        
+        # PROBLEM 4: Unsafe mathematical operations
+        days_active = (datetime.utcnow() - campaign.launched_at).days  # Will fail if launched_at is None
+        
+        # PROBLEM 5: Unsafe dictionary access from hypothetical external API
+        external_data = None  # Simulating failed API call
+        conversion_rate = external_data['metrics']['conversion_rate']  # Will fail
+        
+        return {
+            "campaign_id": campaign_id,
+            "name": campaign_name,
+            "launch_date": launch_date,
+            "description_length": description_length,
+            "days_active": days_active,
+            "conversion_rate": conversion_rate,
+            "status": "success"
+        }
+        
+    except Exception as e:
+        logger.error(f"Analytics error for campaign {campaign_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "AnalyticsError",
+                "message": f"Failed to generate analytics for campaign {campaign_id}",
+                "error_details": str(e),
+                "campaign_id": campaign_id,
+                "fix_needed": "This endpoint needs null-safe defensive coding"
+            }
         )
 
 if __name__ == "__main__":
